@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import axios from "axios";
 import * as cheerio from "cheerio";
+import FormData from "form-data";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   let { url } = req.query;
@@ -8,16 +9,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!url) {
     return res.status(400).json({ error: "Missing ?url parameter" });
   }
+  if (Array.isArray(url)) url = url[0];
 
-  // Handle array case (when query has multiple `url=`)
-  if (Array.isArray(url)) {
-    url = url[0];
-  }
-
-  // Force to string and normalize
   const targetUrl = decodeURIComponent(url.toString().trim());
-
-  // Validate it’s a proper http/https URL
   if (!/^https?:\/\//i.test(targetUrl)) {
     return res.status(400).json({ error: "Invalid ?url parameter", value: targetUrl });
   }
@@ -34,44 +28,93 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   };
 
   try {
-    // Step 1: Fetch page
+    // Step 1: fetch page
     const resPage = await axios.get(targetUrl, { headers });
     const $ = cheerio.load(resPage.data);
 
-    // Step 2: Find iframe source
-    const iframeSrc = $("iframe").attr("src");
-    if (!iframeSrc) {
-      return res.status(404).json({ error: "No iframe found on page" });
+    const postId = $("#player-option-1").attr("data-post");
+    const nume = $("#player-option-1").attr("data-nume");
+    const typeValue = $("#player-option-1").attr("data-type");
+    const baseUrl = targetUrl.split("/").slice(0, 3).join("/");
+
+    if (!postId) {
+      return res.status(404).json({ error: "Player element not found" });
     }
 
-    // Step 3: Resolve iframe URL
-    const iframeUrl = iframeSrc.startsWith("http")
-      ? iframeSrc
-      : new URL(iframeSrc, targetUrl).toString();
+    // Step 2: call ajax
+    const formData = new FormData();
+    formData.append("action", "doo_player_ajax");
+    formData.append("post", postId);
+    formData.append("nume", nume || "");
+    formData.append("type", typeValue || "");
 
-    const iframeRes = await axios.get(iframeUrl, { headers });
+    const playerRes = await fetch(`${baseUrl}/wp-admin/admin-ajax.php`, {
+      headers,
+      body: formData as any,
+      method: "POST",
+    });
+    const playerData = await playerRes.json();
+
+    let iframeUrl =
+      playerData?.embed_url?.match(/<iframe[^>]+src="([^"]+)"/i)?.[1] ||
+      playerData?.embed_url;
+
+    if (!iframeUrl) {
+      return res.status(404).json({ error: "No iframe URL found" });
+    }
+
+    // Step 3: fetch iframe page
+    const iframeRes = await axios.get(iframeUrl, { headers: { ...headers, Referer: targetUrl } });
     const iframeHtml = iframeRes.data;
 
-    // Step 4: Extract M3U8 link
-    const m3u8Match = iframeHtml.match(/(https?:\/\/[^"']+\.m3u8[^"']*)/);
-    if (!m3u8Match) {
+    // Step 4: decode eval-packed JS
+    const functionRegex = /eval\(function\((.*?)\)\{.*?return p\}.*?\('(.*?)'\.split/;
+    const match = functionRegex.exec(iframeHtml);
+    let decoded = "";
+    if (match) {
+      const encodedString = match[2];
+      decoded = encodedString.split("',36,")[0].trim();
+      let a = 36;
+      let c = encodedString.split("',36,")[1].slice(2).split("|").length;
+      let k = encodedString.split("',36,")[1].slice(2).split("|");
+      while (c--) {
+        if (k[c]) {
+          const regex = new RegExp("\\b" + c.toString(a) + "\\b", "g");
+          decoded = decoded.replace(regex, k[c]);
+        }
+      }
+    }
+
+    // Step 5: extract m3u8
+    const streamUrl = decoded?.match(/https?:\/\/[^"']+?\.m3u8[^"']*/)?.[0];
+    if (!streamUrl) {
       return res.status(404).json({ error: "No m3u8 link found" });
     }
 
-    const m3u8Url = m3u8Match[1];
+    // Step 6: optional subtitles
+    const subtitles: { language: string; uri: string; type: string; title: string }[] = [];
+    const subtitleMatch = decoded?.match(/https:\/\/[^\s"']+\.vtt/g);
+    if (subtitleMatch?.length) {
+      subtitleMatch.forEach((sub: string) => {
+        const lang = sub.match(/_([a-zA-Z]{2,3})\.vtt$/)?.[1] || "und";
+        subtitles.push({
+          language: lang,
+          uri: sub,
+          type: "text/vtt",
+          title: lang,
+        });
+      });
+    }
 
-    // ✅ Return JSON
+    // ✅ Response
     return res.json({
       server: "MultiMovies",
       type: "m3u8",
-      link: m3u8Url,
+      link: streamUrl.replace(/&i=\d+,'\.4&/, "&i=0.4&"),
+      subtitles,
     });
   } catch (err: any) {
-    return res.status(500).json({
-      error: "Internal error",
-      details: err.message,
-    });
+    console.error(err);
+    return res.status(500).json({ error: "Internal error", details: err.message || err });
   }
-}
-
 }
