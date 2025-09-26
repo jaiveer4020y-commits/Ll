@@ -1,13 +1,25 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import axios from "axios";
 import * as cheerio from "cheerio";
-import FormData from "form-data";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  const { url } = req.query;
+  let { url } = req.query;
 
-  if (!url || typeof url !== "string") {
+  if (!url) {
     return res.status(400).json({ error: "Missing ?url parameter" });
+  }
+
+  // Handle array case (when query has multiple `url=`)
+  if (Array.isArray(url)) {
+    url = url[0];
+  }
+
+  // Force to string and normalize
+  const targetUrl = decodeURIComponent(url.toString().trim());
+
+  // Validate it’s a proper http/https URL
+  if (!/^https?:\/\//i.test(targetUrl)) {
+    return res.status(400).json({ error: "Invalid ?url parameter", value: targetUrl });
   }
 
   const headers = {
@@ -23,72 +35,43 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     // Step 1: Fetch page
-    const resPage = await axios.get(url, { headers });
+    const resPage = await axios.get(targetUrl, { headers });
     const $ = cheerio.load(resPage.data);
 
-    const postId = $("#player-option-1").attr("data-post");
-    const nume = $("#player-option-1").attr("data-nume");
-    const typeValue = $("#player-option-1").attr("data-type");
-    const baseUrl = url.split("/").slice(0, 3).join("/");
-
-    const formData = new FormData();
-    formData.append("action", "doo_player_ajax");
-    formData.append("post", postId || "");
-    formData.append("nume", nume || "");
-    formData.append("type", typeValue || "");
-
-    // Step 2: Ajax request
-    const playerRes = await fetch(`${baseUrl}/wp-admin/admin-ajax.php`, {
-      headers,
-      body: formData as any,
-      method: "POST",
-    });
-
-    const playerData = await playerRes.json();
-    let iframeUrl =
-      playerData?.embed_url?.match(/<iframe[^>]+src="([^"]+)"/i)?.[1] ||
-      playerData?.embed_url;
-
-    // Step 3: Open iframe page
-    const iframeRes = await axios.get(iframeUrl, {
-      headers: { ...headers, Referer: url },
-    });
-    const iframeData = iframeRes.data;
-
-    // Step 4: Decode packed eval
-    const functionRegex =
-      /eval\(function\((.*?)\)\{.*?return p\}.*?\('(.*?)'\.split/;
-    const match = functionRegex.exec(iframeData);
-    let decoded = "";
-    if (match) {
-      const encodedString = match[2];
-      decoded = encodedString.split("',36,")[0].trim();
-      let a = 36;
-      let c = encodedString.split("',36,")[1].slice(2).split("|").length;
-      let k = encodedString.split("',36,")[1].slice(2).split("|");
-      while (c--) {
-        if (k[c]) {
-          var regex = new RegExp("\\b" + c.toString(a) + "\\b", "g");
-          decoded = decoded.replace(regex, k[c]);
-        }
-      }
+    // Step 2: Find iframe source
+    const iframeSrc = $("iframe").attr("src");
+    if (!iframeSrc) {
+      return res.status(404).json({ error: "No iframe found on page" });
     }
 
-    const streamUrl = decoded?.match(/https?:\/\/[^"]+?\.m3u8[^"]*/)?.[0];
+    // Step 3: Resolve iframe URL
+    const iframeUrl = iframeSrc.startsWith("http")
+      ? iframeSrc
+      : new URL(iframeSrc, targetUrl).toString();
 
-    if (!streamUrl) {
-      return res.status(404).json({ error: "No m3u8 found" });
+    const iframeRes = await axios.get(iframeUrl, { headers });
+    const iframeHtml = iframeRes.data;
+
+    // Step 4: Extract M3U8 link
+    const m3u8Match = iframeHtml.match(/(https?:\/\/[^"']+\.m3u8[^"']*)/);
+    if (!m3u8Match) {
+      return res.status(404).json({ error: "No m3u8 link found" });
     }
 
+    const m3u8Url = m3u8Match[1];
+
+    // ✅ Return JSON
     return res.json({
-      server: "Multi",
+      server: "MultiMovies",
       type: "m3u8",
-      link: streamUrl.replace(/&i=\d+,'\.4&/, "&i=0.4&"),
+      link: m3u8Url,
     });
   } catch (err: any) {
-    console.error(err.message || err);
-    return res
-      .status(500)
-      .json({ error: "Internal error", details: err.message || err });
+    return res.status(500).json({
+      error: "Internal error",
+      details: err.message,
+    });
   }
+}
+
 }
