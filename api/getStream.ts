@@ -28,23 +28,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   };
 
   try {
-    // Step 1: fetch page
+    /** STEP 1: Load movie page */
     const resPage = await axios.get(targetUrl, { headers });
     const $ = cheerio.load(resPage.data);
 
-    const postId = $("#player-option-1").attr("data-post");
-    const nume = $("#player-option-1").attr("data-nume");
-    const typeValue = $("#player-option-1").attr("data-type");
-    const baseUrl = targetUrl.split("/").slice(0, 3).join("/");
-
-    if (!postId) {
+    const playerElement = $("#player-option-1");
+    if (!playerElement.length) {
       return res.status(404).json({ error: "Player element not found" });
     }
 
-    // Step 2: call ajax
+    const postId = playerElement.attr("data-post");
+    const nume = playerElement.attr("data-nume");
+    const typeValue = playerElement.attr("data-type");
+    const baseUrl = targetUrl.split("/").slice(0, 3).join("/");
+
+    /** STEP 2: Call doo_player_ajax */
     const formData = new FormData();
     formData.append("action", "doo_player_ajax");
-    formData.append("post", postId);
+    formData.append("post", postId || "");
     formData.append("nume", nume || "");
     formData.append("type", typeValue || "");
 
@@ -55,19 +56,71 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
     const playerData = await playerRes.json();
 
-    let iframeUrl =
-      playerData?.embed_url?.match(/<iframe[^>]+src="([^"]+)"/i)?.[1] ||
-      playerData?.embed_url;
+    /** STEP 3: Extract iframe URL */
+    let iframeUrl: string | undefined;
 
-    if (!iframeUrl) {
-      return res.status(404).json({ error: "No iframe URL found" });
+    if (typeof playerData?.embed_url === "string") {
+      const iframeMatch = playerData.embed_url.match(/<iframe[^>]+src="([^"]+)"/i);
+      if (iframeMatch) iframeUrl = iframeMatch[1];
+      if (!iframeUrl && playerData.embed_url.startsWith("http")) {
+        iframeUrl = playerData.embed_url;
+      }
+    }
+    if (!iframeUrl && typeof playerData?.embed_url?.url === "string") {
+      iframeUrl = playerData.embed_url.url;
     }
 
-    // Step 3: fetch iframe page
-    const iframeRes = await axios.get(iframeUrl, { headers: { ...headers, Referer: targetUrl } });
+    if (!iframeUrl) {
+      console.error("playerData", playerData);
+      return res.status(404).json({ error: "No iframe URL found", raw: playerData });
+    }
+
+    /** STEP 4: Handle external iframe providers */
+    if (!iframeUrl.includes("multimovies")) {
+      let playerBaseUrl = iframeUrl.split("/").slice(0, 3).join("/");
+
+      try {
+        const newPlayerBaseUrl = await axios.head(playerBaseUrl, { headers });
+        if (newPlayerBaseUrl?.request?.responseURL) {
+          playerBaseUrl = newPlayerBaseUrl.request.responseURL
+            .split("/")
+            .slice(0, 3)
+            .join("/");
+        }
+      } catch (e: any) {
+        if (e?.response?.headers?.location) {
+          playerBaseUrl = e.response.headers.location;
+        }
+      }
+
+      const playerId = iframeUrl.split("/").pop();
+      const newFormData = new FormData();
+      newFormData.append("sid", playerId || "");
+
+      const helperRes = await fetch(`${playerBaseUrl}/embedhelper.php`, {
+        headers,
+        body: newFormData as any,
+        method: "POST",
+      });
+      const helperData = await helperRes.json();
+
+      const siteUrl = helperData?.siteUrls?.smwh;
+      const siteId =
+        JSON.parse(Buffer.from(helperData?.mresult, "base64").toString())?.smwh ||
+        helperData?.mresult?.smwh;
+
+      if (siteUrl && siteId) {
+        iframeUrl = siteUrl + siteId;
+      }
+    }
+
+    /** STEP 5: Fetch iframe page */
+    const iframeRes = await axios.get(iframeUrl, {
+      headers: { ...headers, Referer: targetUrl },
+    });
     const iframeHtml = iframeRes.data;
 
-    // Step 4: decode eval-packed JS
+    /** STEP 6: Decode obfuscated eval script */
     const functionRegex = /eval\(function\((.*?)\)\{.*?return p\}.*?\('(.*?)'\.split/;
     const match = functionRegex.exec(iframeHtml);
     let decoded = "";
@@ -85,13 +138,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    // Step 5: extract m3u8
+    /** STEP 7: Extract stream and subtitles */
     const streamUrl = decoded?.match(/https?:\/\/[^"']+?\.m3u8[^"']*/)?.[0];
     if (!streamUrl) {
       return res.status(404).json({ error: "No m3u8 link found" });
     }
 
-    // Step 6: optional subtitles
     const subtitles: { language: string; uri: string; type: string; title: string }[] = [];
     const subtitleMatch = decoded?.match(/https:\/\/[^\s"']+\.vtt/g);
     if (subtitleMatch?.length) {
@@ -106,7 +158,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    // ✅ Response
+    /** ✅ Final Response */
     return res.json({
       server: "MultiMovies",
       type: "m3u8",
@@ -118,3 +170,4 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(500).json({ error: "Internal error", details: err.message || err });
   }
 }
+
