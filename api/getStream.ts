@@ -1,177 +1,203 @@
-import type { VercelRequest, VercelResponse } from "@vercel/node";
-import axios from "axios";
-import * as cheerio from "cheerio";
-import FormData from "form-data";
+import axios from 'axios';
+import * as cheerio from 'cheerio';
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-  let { url } = req.query;
+export default async function handler(req, res) {
+  // Set CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  // Handle OPTIONS request for CORS preflight
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
+  // Only allow GET requests
+  if (req.method !== 'GET') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  const { url } = req.query;
 
   if (!url) {
-    return res.status(400).json({ error: "Missing ?url parameter" });
+    return res.status(400).json({ error: 'Missing url parameter' });
   }
-  if (Array.isArray(url)) url = url[0];
-
-  const targetUrl = decodeURIComponent(url.toString().trim());
-  if (!/^https?:\/\//i.test(targetUrl)) {
-    return res.status(400).json({ error: "Invalid ?url parameter", value: targetUrl });
-  }
-
-  const headers = {
-    "sec-ch-ua":
-      '"Not_A Brand";v="8", "Chromium";v="120", "Microsoft Edge";v="120"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    Referer: "https://multimovies.online/",
-    "Sec-Fetch-User": "?1",
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-  };
 
   try {
-    /** STEP 1: Load movie page */
-    const resPage = await axios.get(targetUrl, { headers });
-    const $ = cheerio.load(resPage.data);
-
-    // ✅ Pick the first available player option
-    const playerElement = $(".dooplay_player_option").first();
-    if (!playerElement.length) {
-      return res.status(404).json({ error: "No player options found" });
+    const streamData = await getStreamData(url);
+    
+    if (streamData.length === 0) {
+      return res.status(404).json({ error: 'No streams found' });
     }
 
-    const postId = playerElement.attr("data-post");
-    const nume = playerElement.attr("data-nume");
-    const typeValue = playerElement.attr("data-type");
-    const baseUrl = targetUrl.split("/").slice(0, 3).join("/");
-
-    console.log("Using player option:", { postId, nume, typeValue });
-
-    /** STEP 2: Call doo_player_ajax */
-    const formData = new FormData();
-    formData.append("action", "doo_player_ajax");
-    formData.append("post", postId || "");
-    formData.append("nume", nume || "");
-    formData.append("type", typeValue || "");
-
-    const playerRes = await fetch(`${baseUrl}/wp-admin/admin-ajax.php`, {
-      headers,
-      body: formData as any,
-      method: "POST",
+    return res.status(200).json({
+      success: true,
+      data: streamData,
+      source: 'multimovies'
     });
-    const playerData = await playerRes.json();
 
-    /** STEP 3: Extract iframe URL */
-    let iframeUrl: string | undefined;
+  } catch (error) {
+    console.error('Scraping error:', error);
+    return res.status(500).json({ 
+      error: 'Internal server error',
+      message: error.message 
+    });
+  }
+}
 
-    if (typeof playerData?.embed_url === "string") {
-      const iframeMatch = playerData.embed_url.match(/<iframe[^>]+src="([^"]+)"/i);
-      if (iframeMatch) iframeUrl = iframeMatch[1];
-      if (!iframeUrl && playerData.embed_url.startsWith("http")) {
-        iframeUrl = playerData.embed_url;
+async function getStreamData(url) {
+  const headers = {
+    "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Microsoft Edge";v="120"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "Referer": "https://multimovies.online/",
+    "Sec-Fetch-User": "?1",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+  };
+
+  const res = await axios.get(url, { headers });
+  const html = res.data;
+  const $ = cheerio.load(html);
+  const streamLinks = [];
+
+  const postId = $("#player-option-1").attr("data-post");
+  const nume = $("#player-option-1").attr("data-nume");
+  const typeValue = $("#player-option-1").attr("data-type");
+
+  const baseUrl = url.split("/").slice(0, 3).join("/");
+
+  const formData = new URLSearchParams();
+  formData.append("action", "doo_player_ajax");
+  formData.append("post", postId || "");
+  formData.append("nume", nume || "");
+  formData.append("type", typeValue || "");
+
+  const playerRes = await fetch(`${baseUrl}/wp-admin/admin-ajax.php`, {
+    headers: headers,
+    body: formData,
+    method: "POST",
+  });
+  
+  const playerData = await playerRes.json();
+  
+  let ifameUrl =
+    playerData?.embed_url?.match(/<iframe[^>]+src="([^"]+)"[^>]*>/i)?.[1] ||
+    playerData?.embed_url;
+
+  if (!ifameUrl.includes("multimovies")) {
+    let playerBaseUrl = ifameUrl.split("/").slice(0, 3).join("/");
+    
+    try {
+      const newPlayerBaseUrl = await axios.head(playerBaseUrl, { 
+        headers,
+        maxRedirects: 5 
+      });
+      
+      if (newPlayerBaseUrl?.request?.responseURL) {
+        playerBaseUrl = newPlayerBaseUrl.request.responseURL
+          .split("/")
+          .slice(0, 3)
+          .join("/");
       }
-    }
-    if (!iframeUrl && typeof playerData?.embed_url?.url === "string") {
-      iframeUrl = playerData.embed_url.url;
-    }
-
-    if (!iframeUrl) {
-      console.error("playerData", playerData);
-      return res.status(404).json({ error: "No iframe URL found", raw: playerData });
-    }
-
-    /** STEP 4: Handle external iframe providers */
-    if (!iframeUrl.includes("multimovies")) {
-      let playerBaseUrl = iframeUrl.split("/").slice(0, 3).join("/");
-
+    } catch (error) {
+      console.log('Head request failed, trying with redirect handling');
+      
       try {
-        const newPlayerBaseUrl = await axios.head(playerBaseUrl, { headers });
-        if (newPlayerBaseUrl?.request?.responseURL) {
-          playerBaseUrl = newPlayerBaseUrl.request.responseURL
+        const redirectResponse = await axios.get(playerBaseUrl, {
+          headers,
+          maxRedirects: 0,
+          validateStatus: (status) => status >= 200 && status < 400,
+        });
+        
+        if (redirectResponse.headers?.location) {
+          playerBaseUrl = redirectResponse.headers.location
             .split("/")
             .slice(0, 3)
             .join("/");
         }
-      } catch (e: any) {
-        if (e?.response?.headers?.location) {
-          playerBaseUrl = e.response.headers.location;
-        }
-      }
-
-      const playerId = iframeUrl.split("/").pop();
-      const newFormData = new FormData();
-      newFormData.append("sid", playerId || "");
-
-      const helperRes = await fetch(`${playerBaseUrl}/embedhelper.php`, {
-        headers,
-        body: newFormData as any,
-        method: "POST",
-      });
-      const helperData = await helperRes.json();
-
-      const siteUrl = helperData?.siteUrls?.smwh;
-      const siteId =
-        JSON.parse(Buffer.from(helperData?.mresult, "base64").toString())?.smwh ||
-        helperData?.mresult?.smwh;
-
-      if (siteUrl && siteId) {
-        iframeUrl = siteUrl + siteId;
+      } catch (redirectError) {
+        console.log('Redirect handling failed, using original URL');
       }
     }
 
-    /** STEP 5: Fetch iframe page */
-    const iframeRes = await axios.get(iframeUrl, {
-      headers: { ...headers, Referer: targetUrl },
+    const playerId = ifameUrl.split("/").pop();
+    const NewformData = new URLSearchParams();
+    NewformData.append("sid", playerId);
+    
+    const embedRes = await fetch(`${playerBaseUrl}/embedhelper.php`, {
+      headers: headers,
+      body: NewformData,
+      method: "POST",
     });
-    const iframeHtml = iframeRes.data;
+    
+    const embedData = await embedRes.json();
+    const siteUrl = embedData?.siteUrls?.smwh;
+    const siteId = JSON.parse(Buffer.from(embedData?.mresult, 'base64').toString())?.smwh || embedData?.mresult?.smwh;
+    const newIframeUrl = siteUrl + siteId;
+    
+    if (newIframeUrl) {
+      ifameUrl = newIframeUrl;
+    }
+  }
 
-    /** STEP 6: Decode obfuscated eval script */
-    const functionRegex = /eval\(function\((.*?)\)\{.*?return p\}.*?\('(.*?)'\.split/;
-    const match = functionRegex.exec(iframeHtml);
-    let decoded = "";
-    if (match) {
-      const encodedString = match[2];
-      decoded = encodedString.split("',36,")[0].trim();
-      let a = 36;
-      let c = encodedString.split("',36,")[1].slice(2).split("|").length;
-      let k = encodedString.split("',36,")[1].slice(2).split("|");
-      while (c--) {
-        if (k[c]) {
-          const regex = new RegExp("\\b" + c.toString(a) + "\\b", "g");
-          decoded = decoded.replace(regex, k[c]);
-        }
+  const iframeRes = await axios.get(ifameUrl, {
+    headers: {
+      ...headers,
+      Referer: url,
+    },
+  });
+  
+  const iframeData = iframeRes.data;
+
+  // Decode the obfuscated JavaScript
+  const functionRegex = /eval\(function\((.*?)\)\{.*?return p\}.*?\('(.*?)'\.split/;
+  const match = functionRegex.exec(iframeData);
+  let p = "";
+  
+  if (match) {
+    const encodedString = match[2];
+    p = encodedString.split("',36,")?.[0].trim();
+    const a = 36;
+    const k = encodedString.split("',36,")[1].slice(2).split("|");
+    const c = k.length;
+
+    for (let i = 0; i < c; i++) {
+      if (k[i]) {
+        const regex = new RegExp("\\b" + i.toString(a) + "\\b", "g");
+        p = p.replace(regex, k[i]);
       }
     }
+  }
 
-    /** STEP 7: Extract stream and subtitles */
-    const streamUrl = decoded?.match(/https?:\/\/[^"']+?\.m3u8[^"']*/)?.[0];
-    if (!streamUrl) {
-      return res.status(404).json({ error: "No m3u8 link found" });
-    }
+  const streamUrl = p?.match(/https?:\/\/[^"]+?\.m3u8[^"]*/)?.[0];
+  const subtitles = [];
+  const subtitleMatch = p?.match(/https:\/\/[^\s"]+\.vtt/g);
 
-    const subtitles: { language: string; uri: string; type: string; title: string }[] = [];
-    const subtitleMatch = decoded?.match(/https:\/\/[^\s"']+\.vtt/g);
-    if (subtitleMatch?.length) {
-      subtitleMatch.forEach((sub: string) => {
-        const lang = sub.match(/_([a-zA-Z]{2,3})\.vtt$/)?.[1] || "und";
+  if (subtitleMatch?.length) {
+    subtitleMatch.forEach((sub) => {
+      const langMatch = sub.match(/_([a-zA-Z]{3})\.vtt$/);
+      if (langMatch) {
+        const lang = langMatch[1];
         subtitles.push({
           language: lang,
           uri: sub,
           type: "text/vtt",
           title: lang,
         });
-      });
-    }
-
-    /** ✅ Final Response */
-    return res.json({
-      server: "MultiMovies",
-      type: "m3u8",
-      link: streamUrl.replace(/&i=\d+,'\.4&/, "&i=0.4&"),
-      subtitles,
+      }
     });
-  } catch (err: any) {
-    console.error(err);
-    return res.status(500).json({ error: "Internal error", details: err.message || err });
   }
+
+  if (streamUrl) {
+    const cleanedUrl = streamUrl.replace(/&i=\d+,'\.4&/, "&i=0.4&");
+    
+    streamLinks.push({
+      server: "Multi",
+      link: cleanedUrl,
+      type: "m3u8",
+      subtitles: subtitles,
+    });
+  }
+
+  return streamLinks;
 }
-
-
