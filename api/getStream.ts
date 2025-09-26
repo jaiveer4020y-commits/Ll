@@ -32,15 +32,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const resPage = await axios.get(targetUrl, { headers });
     const $ = cheerio.load(resPage.data);
 
-    const playerElement = $("#player-option-1");
+    // ✅ Pick the first available player option
+    const playerElement = $(".dooplay_player_option").first();
     if (!playerElement.length) {
-      return res.status(404).json({ error: "Player element not found" });
+      return res.status(404).json({ error: "No player options found" });
     }
 
     const postId = playerElement.attr("data-post");
     const nume = playerElement.attr("data-nume");
     const typeValue = playerElement.attr("data-type");
     const baseUrl = targetUrl.split("/").slice(0, 3).join("/");
+
+    console.log("Using player option:", { postId, nume, typeValue });
 
     /** STEP 2: Call doo_player_ajax */
     const formData = new FormData();
@@ -170,4 +173,5 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(500).json({ error: "Internal error", details: err.message || err });
   }
 }
+
 
