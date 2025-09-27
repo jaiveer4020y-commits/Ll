@@ -9,13 +9,11 @@
   "routes": [
     {
       "src": "/api/(.*)",
-      "dest": "/api/$1",
-      "methods": ["GET", "POST", "OPTIONS"]
+      "dest": "/api/$1"
     },
     {
       "src": "/",
-      "dest": "/api/index.ts",
-      "methods": ["GET"]
+      "dest": "/api/index.ts"
     }
   ],
   "functions": {
