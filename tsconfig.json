@@ -1,11 +1,24 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "ESNext",
-    "moduleResolution": "Node",
+    "target": "es2017",
+    "lib": ["es2017", "dom"],
+    "module": "commonjs",
+    "moduleResolution": "node",
     "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "strict": false,
-    "skipLibCheck": true
-  }
+    "outDir": "./dist",
+    "rootDir": "./",
+    "resolveJsonModule": true
+  },
+  "include": [
+    "api/**/*",
+    "*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
 }
