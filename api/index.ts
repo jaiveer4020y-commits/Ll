@@ -4,7 +4,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const { url } = req.query;
 
   if (!url) {
-    return res.redirect(302, '/api/getStream?url=' + encodeURIComponent('https://multimovies.online'));
+    return res.redirect(302, '/api/getStream?url=' + encodeURIComponent('https://multimovies.mobi'));
   }
 
   // Redirect to getStream endpoint
